@@ -29,11 +29,7 @@ class ZarinaSpider(scrapy.Spider):
     def parse(self, response):
         self.logger.info(f"Парсинг страницы каталога: {response.url}")
 
-
-        if '/man/' in response.url:
-            main_category = 'Мужчинам'
-        else:
-            main_category = 'Женщинам'
+        main_category = 'Мужчинам' if '/man/' in response.url else 'Женщинам'
 
         script_text = response.xpath("//script[contains(., 'self.__next_f.push') and contains(., 'products')]/text()").get()
         if not script_text:
@@ -68,13 +64,14 @@ class ZarinaSpider(scrapy.Spider):
         products = data_block.get('products', [])
         pagination = data_block.get('pagination', {})
 
+        # Отправляем запросы на страницы всех товаров. Scrapy обработает их асинхронно.
         for product_info in products:
-            item = ZarinaProduct()
             product_id = product_info.get('id')
             if not product_id:
                 self.logger.warning(f"Не найден ID для товара, пропускаем. Инфо: {product_info}")
                 continue
             
+            item = ZarinaProduct()
             item['url'] = response.urljoin(f"/catalog/product/{product_id}/")
             
             yield scrapy.Request(
@@ -83,6 +80,7 @@ class ZarinaSpider(scrapy.Spider):
                 meta={'item': item, 'product_info': product_info, 'main_category': main_category}
             )
 
+        # Переходим на следующую страницу каталога, если она есть
         current_page = pagination.get('current_page', 1)
         total_pages = pagination.get('total_pages', 1)
 
@@ -104,8 +102,10 @@ class ZarinaSpider(scrapy.Spider):
         item['category'] = f"Главная > {main_category} > Одежда"
             
         raw_name = product_info.get('name', '')
-        try: item['name'] = raw_name.encode('latin-1').decode('utf-8')
-        except: item['name'] = raw_name
+        try: 
+            item['name'] = raw_name.encode('latin-1').decode('utf-8')
+        except: 
+            item['name'] = raw_name
             
         item['product_code'] = product_info.get('id')
         price = product_info.get('price', {})
