@@ -26,23 +26,22 @@ class ZarinaSpider(scrapy.Spider):
         else:
             self.logger.error(f"Неизвестная категория: '{category_to_parse}'. Доступные: 'women', 'men', 'all'.")
 
+    # ИЗМЕНЕНИЕ 1 узнать общее число страниц и сразу создать запросы на все остальные
     def parse(self, response):
-        self.logger.info(f"Парсинг страницы каталога: {response.url}")
 
+        self.logger.info(f"Зашли на первую страницу категории: {response.url}")
+        
         main_category = 'Мужчинам' if '/man/' in response.url else 'Женщинам'
-
+        
         script_text = response.xpath("//script[contains(., 'self.__next_f.push') and contains(., 'products')]/text()").get()
         if not script_text:
             self.logger.error(f"Не удалось найти скрипт с данными на странице {response.url}")
             return
-            
         match = re.search(r'self\.__next_f\.push\(\[1,"[^:]*:(.*)"\]\)', script_text, re.DOTALL)
         if not match:
             self.logger.error(f"Не удалось извлечь JSON-строку из скрипта на {response.url}")
             return
-            
         js_string_literal = match.group(1)
-        
         try:
             json_string = codecs.decode(js_string_literal, 'unicode_escape')
             data = json.loads(json_string)
@@ -61,10 +60,71 @@ class ZarinaSpider(scrapy.Spider):
             return None
 
         data_block = find_block(data, 'products') or {}
-        products = data_block.get('products', [])
         pagination = data_block.get('pagination', {})
+        
+        # cначала обрабатываем товары с текущей страницы
+        yield from self.parse_page(response, data_block, main_category)
 
-        # Отправляем запросы на страницы всех товаров. Scrapy обработает их асинхронно.
+        # ИЗМЕНЕНИЕ 2 узнаем общее число страниц и в цикле СОЗДАЕМ ЗАПРОСЫ НА ВСЕ ОСТАЛЬНЫЕ СТРАНИЦЫ СРАЗУ
+        total_pages = pagination.get('total_pages', 1)
+        self.logger.info(f"Найдено всего {total_pages} страниц.")
+
+        for page_num in range(2, total_pages + 1):
+            parsed_url = urlparse(response.url)
+            query_params = parse_qs(parsed_url.query)
+            query_params['PAGEN_1'] = [str(page_num)]
+            next_page_url = parsed_url._replace(query=urlencode(query_params, doseq=True)).geturl()
+            
+            yield scrapy.Request(
+                url=next_page_url, 
+                callback=self.parse_page_wrapper,
+                meta={'main_category': main_category}
+            )
+    
+    # ИЗМЕНЕНИЕ 3 чтобы извлечь json и передать его в общий обработчик
+    def parse_page_wrapper(self, response):
+        """
+        Вспомогательный метод-обертка для страниц со 2-й по N-ю.
+        Он извлекает JSON и вызывает основной обработчик страниц `parse_page`.
+        """
+        main_category = response.meta['main_category']
+
+        script_text = response.xpath("//script[contains(., 'self.__next_f.push') and contains(., 'products')]/text()").get()
+        if not script_text:
+            self.logger.error(f"Не удалось найти скрипт с данными на странице {response.url}")
+            return
+        match = re.search(r'self\.__next_f\.push\(\[1,"[^:]*:(.*)"\]\)', script_text, re.DOTALL)
+        if not match:
+            self.logger.error(f"Не удалось извлечь JSON-строку из скрипта на {response.url}")
+            return
+        js_string_literal = match.group(1)
+        try:
+            json_string = codecs.decode(js_string_literal, 'unicode_escape')
+            data = json.loads(json_string)
+        except (json.JSONDecodeError, TypeError) as e:
+            self.logger.error(f"Ошибка декодирования JSON на {response.url}: {e}", exc_info=True)
+            return
+
+        def find_block(d, key_to_find):
+            if isinstance(d, dict) and key_to_find in d: return d
+            if isinstance(d, dict):
+                for value in d.values():
+                    if (found := find_block(value, key_to_find)): return found
+            elif isinstance(d, list):
+                for item in d:
+                    if (found := find_block(item, key_to_find)): return found
+            return None
+        data_block = find_block(data, 'products') or {}
+        
+        yield from self.parse_page(response, data_block, main_category)
+
+    # ИЗМЕНЕНИЕ 4 метод который теперь отвечает только за парсинг товаров с любой страницы
+    def parse_page(self, response, data_block, main_category):
+        page = data_block.get('pagination', {}).get('current_page', 1)
+        self.logger.info(f"Парсинг товаров со страницы {page}. URL: {response.url}")
+
+        products = data_block.get('products', [])
+        
         for product_info in products:
             product_id = product_info.get('id')
             if not product_id:
@@ -79,20 +139,6 @@ class ZarinaSpider(scrapy.Spider):
                 callback=self.parse_product_page,
                 meta={'item': item, 'product_info': product_info, 'main_category': main_category}
             )
-
-        # Переходим на следующую страницу каталога, если она есть
-        current_page = pagination.get('current_page', 1)
-        total_pages = pagination.get('total_pages', 1)
-
-        if current_page < total_pages:
-            next_page_num = current_page + 1
-            parsed_url = urlparse(response.url)
-            query_params = parse_qs(parsed_url.query)
-            query_params['PAGEN_1'] = [str(next_page_num)]
-            next_page_url = parsed_url._replace(query=urlencode(query_params, doseq=True)).geturl()
-            
-            self.logger.info(f"Переход на следующую страницу каталога: {next_page_url}")
-            yield response.follow(next_page_url, callback=self.parse)
 
     def parse_product_page(self, response):
         self.logger.info(f"Парсинг страницы товара: {response.url}")
